@@ -28,8 +28,8 @@ ___
 Clone your repository and enter its directory:
 
 ```bash
-git clone https://github.com/farhan/SubTake.git
-cd SubTake
+git clone https://github.com/f4rhn-x/subtake.git
+cd subtake
 ```
 
 Install dependencies:
