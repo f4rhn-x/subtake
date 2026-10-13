@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+import sys
+import dns.resolver
+import requests
+import urllib3
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Color Codes for Terminal Output
+R = "\033[1;31m"  # Red
+G = "\033[1;32m"  # Green
+Y = "\033[1;33m"  # Yellow
+B = "\033[1;34m"  # Blue
+C = "\033[1;36m"  # Cyan
+W = "\033[0m"     # Reset
+
+# Signature Database: Fingerprints of vulnerable cloud services
+FINGERPRINTS = {
+    "GitHub Pages": {
+        "cname": ["github.io"],
+        "body": ["There isn't a GitHub Pages site here", "For root domains, the domain must be configured"]
+    },
+    "AWS S3 Bucket": {
+        "cname": ["amazonaws.com"],
+        "body": ["The specified bucket does not exist", "NoSuchBucket"]
+    },
+    "Fastly": {
+        "cname": ["fastly.net"],
+        "body": ["Fastly error: unknown domain"]
+    },
+    "Zendesk": {
+        "cname": ["zendesk.com"],
+        "body": ["Help Center Closed", "No such app"]
+    },
+    "Shopify": {
+        "cname": ["myshopify.com"],
+        "body": ["Sorry, this shop is currently unavailable", "Only one Shopify store can be hooked up"]
+    },
+    "Heroku": {
+        "cname": ["herokudns.com", "herokuapp.com"],
+        "body": ["no-such-app", "There's nothing here, yet.", "Heroku | Welcome to your new app!"]
+    },
+    "Tumblr": {
+        "cname": ["tumblr.com"],
+        "body": ["Whatever you were looking for doesn't here", "There's nothing here."]
+    },
+    "Squarespace": {
+        "cname": ["squarespace.com"],
+        "body": ["Squarespace - Website Not Found", "this domain has been temporarily disabled"]
+    },
+    "WordPress": {
+        "cname": ["wordpress.com"],
+        "body": ["Do you want to register"]
+    },
+    "Ghost": {
+        "cname": ["ghost.io"],
+        "body": ["The thing you were looking for is no longer here", "Site unavailable"]
+    },
+    "CargoCollective": {
+        "cname": ["cargocollective.com"],
+        "body": ["404 Not Found", "Cargo Collective"]
+    },
+    "Webflow": {
+        "cname": ["webflow.io"],
+        "body": ["The page you are looking for doesn't exist or has been moved"]
+    },
+    "Pantheon": {
+        "cname": ["pantheonsite.io"],
+        "body": ["The Pantheon Site you were looking for"]
+    }
+}
+
+def clean_subdomain(sub):
+    sub = sub.strip().lower()
+    if sub.startswith("http://"): sub = sub[7:]
+    if sub.startswith("https://"): sub = sub[8:]
+    return sub.split("/")[0]
+
+def query_dns(subdomain):
+    """
+    Subzy updates: Performs rigorous CNAME + NXDOMAIN state validation
+    """
+    results = {"cname": [], "status": "NOERROR", "ips": []}
+    resolver = dns.resolver.Resolver()
+    resolver.timeout = 2.0
+    resolver.lifetime = 2.0
+    
+    # 1. Check NXDOMAIN (Dangling DNS without CNAME via edge cases)
+    try:
+        answers = resolver.resolve(subdomain, 'A')
+        results["ips"] = [str(rdata) for rdata in answers]
+    except dns.resolver.NXDOMAIN:
+        results["status"] = "NXDOMAIN"
+        return results
+    except Exception:
+        pass
+
+    # 2. Extract Full CNAME Chain
+    try:
+        target = subdomain
+        while True:
+            cname_answers = resolver.resolve(target, 'CNAME')
+            cname_str = str(cname_answers[0].target).rstrip('.')
+            results["cname"].append(cname_str)
+            target = cname_str
+    except Exception:
+        pass
+        
+    return results
+
+def signature_match(cnames, html_body):
+    """
+    Advanced Signature Matcher engine: Cross-references CNAME chain and body text
+    """
+    for service, meta in FINGERPRINTS.items():
+        # Match via CNAME
+        cname_match = False
+        if meta["cname"]:
+            for c in cnames:
+                if any(domain in c for domain in meta["cname"]):
+                    cname_match = True
+                    break
+        
+        # Match via Body Response
+        body_match = False
+        for hint in meta["body"]:
+            if hint.lower() in html_body.lower():
+                body_match = True
+                break
+                
+        if cname_match and body_match:
+            return service, "VULNERABLE (100% Match)"
+        elif body_match:
+            return service, "EDGE-CASE VULNERABLE (Body Fingerprint Match)"
+        elif cname_match:
+            # Service signature found in CNAME but body didn't match (could be custom 404 or partial setup)
+            return service, "POTENTIAL (Dangling CNAME Found)"
+            
+    return None, None
+
+def check_takeover(subdomain):
+    subdomain = clean_subdomain(subdomain)
+    if not subdomain:
+        return
+        
+    dns_info = query_dns(subdomain)
+    cnames = dns_info["cname"]
+    
+    # Target analysis log
+    cname_chain = " -> ".join(cnames) if cnames else "NONE"
+    
+    # If NXDOMAIN with no CNAME, look into domain hosting logic
+    if dns_info["status"] == "NXDOMAIN":
+        print(f"[{Y}NXDOMAIN{W}] {subdomain} (No active records - Check manual registration availability)")
+        return
+
+    # HTTP Probe if active records or CNAME exists
+    html_content = ""
+    status_code = "N/A"
+    try:
+        # Standard timeout bypass protection
+        req = requests.get(f"https://{subdomain}", timeout=4, verify=False, headers={"User-Agent": "Mozilla/5.0 (BugBounty-Scanner)"})
+        html_content = req.text
+        status_code = str(req.status_code)
+    except requests.exceptions.RequestException:
+        try:
+            req = requests.get(f"http://{subdomain}", timeout=4, verify=False, headers={"User-Agent": "Mozilla/5.0 (BugBounty-Scanner)"})
+            html_content = req.text
+            status_code = str(req.status_code)
+        except Exception:
+            pass
+
+    # Signature validation engine routing
+    service, confidence = signature_match(cnames, html_content)
+    
+    if service:
+        if "VULNERABLE" in confidence:
+            print(f"[{R}🚨 {confidence}{W}] {C}{subdomain}{W} | Service: {Y}{service}{W} | CNAME: {B}{cname_chain}{W} [HTTP {status_code}]")
+        else:
+            print(f"[{Y}⚠️  {confidence}{W}] {C}{subdomain}{W} | Service: {Y}{service}{W} | CNAME: {B}{cname_chain}{W}")
+    else:
+        # Debug verbose formatting
+        print(f"[{G}SAFE{W}] {subdomain} -> CNAME: {cname_chain} [HTTP {status_code}]")
+
+def main():
+    print(f"{B}===================================================={W}")
+    print(f"{C}   ⚡ ADVANCED SUBDOMAIN TAKEOVER SCANNER v2.0 ⚡  {W}")
+    print(f"{B}===================================================={W}\n")
+    
+    if len(sys.argv) < 2:
+        print(f"Usage: python3 {sys.argv[0]} <subdomains_file.txt> [threads]")
+        sys.argv[0]
+        sys.exit(1)
+        
+    file_path = sys.argv[1]
+    threads = int(sys.argv[2]) if len(sys.argv) > 2 else 20
+    
+    try:
+        with open(file_path, "r") as f:
+            subdomains = [line.strip() for line in f if line.strip()]
+    except FileNotFoundError:
+        print(f"[{R}Error{W}] File not found: {file_path}")
+        sys.exit(1)
+
+    print(f"[*] Loaded {len(subdomains)} subdomains. Scanning with {threads} threads...\n")
+    
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        executor.map(check_takeover, subdomains)
+
+if __name__ == "__main__":
+    main()
