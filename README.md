@@ -2,7 +2,7 @@
 SubTake is a multithreaded Python-based subdomain takeover detection and triage tool that analyzes DNS CNAME records and HTTP response fingerprints for authorized bug bounty and security testing.
 ___
 <p align="center">
-  <img src="images/banner.png" alt="SubTake Banner" width="850">
+  <img src="https://github.com/f4rhn-x/subtake/blob/main/subtake-scan.png" alt="SubTake Banner" width="850">
 </p>
 
 <h1 align="center">SubTake</h1>
